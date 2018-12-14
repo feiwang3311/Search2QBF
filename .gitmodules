@@ -1,3 +1,0 @@
-[submodule "ranking"]
-	path = ranking
-	url = https://github.com/tensorflow/ranking.git
