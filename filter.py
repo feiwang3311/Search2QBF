@@ -10,6 +10,7 @@ from mlp import MLP
 from util import repeat_end, decode_final_reducer, decode_transfer_fn
 from tensorflow.contrib.rnn import LSTMStateTuple
 from sklearn.cluster import KMeans
+from tensorflow_ranking import losses
 
 class NeuroSAT(object):
     def __init__(self, opts):
@@ -17,6 +18,9 @@ class NeuroSAT(object):
         self.final_reducer = decode_final_reducer(opts.final_reducer)
         self.build_network()
         self.train_problems_loader = None
+        self.train_counter = 0
+        self.epoch_size = opts.epoch_size
+        self.epoch = 0
 
     def init_random_seeds(self):
         tf.set_random_seed(self.opts.tf_seed)
@@ -65,6 +69,8 @@ class NeuroSAT(object):
 
         # candidates to be ranked by the neural network (None represent number of candidates for each problem)
         self.candidates = tf.placeholder(tf.float32, shape=[n_batches, None, self.n_A_vars_per_problem], name='candidates')
+        # labels: A `Tensor` of shape [batchSize, candidateSize] representing relevance.
+        self.labels = tf.placeholder(tf.int32, shape=[n_batches, None], name='labels')
 
     def while_cond(self, i, L_state, C_state, A_state):
         return tf.less(i, self.opts.n_rounds)
@@ -123,16 +129,16 @@ class NeuroSAT(object):
             self.final_grades = self.A_grader.forward(self.final_pre_grades) # n_batch x None x 1 (None is candidate size)
             self.grades = tf.reshape(self.final_grades, [self.n_batches, None])
 
-    def compute_ranking_loss(self): TO HERE
-        self.predict_costs = tf.nn.sigmoid_cross_entropy_with_logits(logits=self.logits, labels=tf.cast(self.is_sat, tf.float32))
-        self.predict_cost = tf.reduce_mean(self.predict_costs)
-
+    def compute_ranking_loss(self):
+        self.loss_fn = make_loss_fn('pairwise_logistic_loss', lambda_weight=create_ndcg_lambda_weight(), name='ranking_loss_fn')
+        self.ranking_loss = self.loss_fn(self.labels, self.grades, None)
+        
         with tf.name_scope('l2') as scope:
             l2_cost = tf.zeros([])
             for var in tf.trainable_variables():
                 l2_cost += tf.nn.l2_loss(var)
 
-        self.cost = tf.identity(self.predict_cost + self.opts.l2_weight * l2_cost, name="cost")
+        self.cost = tf.identity(self.ranking_loss + self.opts.l2_weight * l2_cost, name="cost")
 
     def build_optimizer(self):
         opts = self.opts
@@ -169,8 +175,10 @@ class NeuroSAT(object):
         self.declare_parameters()
         self.declare_placeholders()
         self.pass_messages()
-        self.compute_logits()
-        self.compute_cost()
+        # self.compute_logits()
+        self.compute_grades()
+        # self.compute_cost()
+        self.compute_ranking_loss()
         self.build_optimizer()
         self.initialize_vars()
         self.init_saver()
@@ -184,11 +192,13 @@ class NeuroSAT(object):
 
     def build_feed_dict(self, problem):
         d = {}
-        d[self.n_L_vars] = problem.n_vars_AL[1]
-        d[self.n_L_lits] = problem.n_lits_AL[1]
         d[self.n_A_vars] = problem.n_vars_AL[0]
         d[self.n_A_lits] = problem.n_lits_AL[0]
+        d[self.n_L_vars] = problem.n_vars_AL[1]
+        d[self.n_L_lits] = problem.n_lits_AL[1]
         d[self.n_clauses] = problem.n_clauses
+        d[self.n_A_vars_per_problem] = problem.sizes[0]
+        d[self.n_L_vars_per_problem] = problem.sizes[1]
 
         d[self.L_unpack] =  tf.SparseTensorValue(indices=problem.L_unpack_indices,
                                                  values=np.ones(problem.L_unpack_indices.shape[0]),
@@ -197,10 +207,28 @@ class NeuroSAT(object):
                                                  values=np.ones(problem.A_unpack_indices.shape[0]),
                                                  dense_shape=[problem.n_lits_AL[0], problem.n_clauses])
 
-        d[self.is_sat] = problem.is_sat
+        #d[self.is_sat] = problem.is_sat
+        d[self.candidates] = problem.candidates
+        d[self.labels] = problem.labels
+
         return d
 
-    def train_epoch(self, epoch):
+    def train_one(self, problem):
+        d = self.build_feed_dict(problem)
+        _, grades, cost = self.sess.run([self.apply_gradients, self.grades, self.costs], feed_dict=d)
+        self.train_counter += 1
+        if self.train_counter >= self.epoch_size:
+            self.train_counter = 0
+            self.epoch += 1
+            self.save(epoch)
+        return grades, cost
+
+    def inference(self, problem):
+        d = self.build_feed_dict(problem)
+        grades = self.sess.run([self.grades], feed_dict=d)
+        return grades
+
+    # def train_epoch(self, epoch):
         if self.train_problems_loader is None:
             self.train_problems_loader = init_problems_loader(self.opts.train_dir)
 
@@ -225,107 +253,107 @@ class NeuroSAT(object):
 
         return (train_filename, epoch_train_cost, epoch_train_mat, learning_rate, epoch_end - epoch_start)
 
-    def test(self, test_data_dir):
-        test_problems_loader = init_problems_loader(test_data_dir)
-        results = []
+    # def test(self, test_data_dir):
+    #     test_problems_loader = init_problems_loader(test_data_dir)
+    #     results = []
 
-        while test_problems_loader.has_next():
-            test_problems, test_filename = test_problems_loader.get_next()
+    #     while test_problems_loader.has_next():
+    #         test_problems, test_filename = test_problems_loader.get_next()
 
-            epoch_test_cost = 0.0
-            epoch_test_mat = ConfusionMatrix()
+    #         epoch_test_cost = 0.0
+    #         epoch_test_mat = ConfusionMatrix()
 
-            for problem in test_problems:
-                d = self.build_feed_dict(problem)
-                logits, cost = self.sess.run([self.logits, self.cost], feed_dict=d)
-                epoch_test_cost += cost
-                epoch_test_mat.update(problem.is_sat, logits > 0)
+    #         for problem in test_problems:
+    #             d = self.build_feed_dict(problem)
+    #             logits, cost = self.sess.run([self.logits, self.cost], feed_dict=d)
+    #             epoch_test_cost += cost
+    #             epoch_test_mat.update(problem.is_sat, logits > 0)
 
-            epoch_test_cost /= len(test_problems)
-            epoch_test_mat = epoch_test_mat.get_percentages()
+    #         epoch_test_cost /= len(test_problems)
+    #         epoch_test_mat = epoch_test_mat.get_percentages()
 
-            results.append((test_filename, epoch_test_cost, epoch_test_mat))
+    #         results.append((test_filename, epoch_test_cost, epoch_test_mat))
 
-        return results
+    #     return results
 
-    def find_solutions(self, problem):
-        def flip_vlit(vlit):
-            if vlit < problem.n_vars: return vlit + problem.n_vars
-            else: return vlit - problem.n_vars
+    # def find_solutions(self, problem):
+    #     def flip_vlit(vlit):
+    #         if vlit < problem.n_vars: return vlit + problem.n_vars
+    #         else: return vlit - problem.n_vars
 
-        n_batches = len(problem.is_sat)
-        n_vars_per_batch = problem.n_vars // n_batches
+    #     n_batches = len(problem.is_sat)
+    #     n_vars_per_batch = problem.n_vars // n_batches
 
-        d = self.build_feed_dict(problem)
-        all_votes, final_lits, logits, costs = self.sess.run([self.all_votes, self.final_lits, self.logits, self.predict_costs], feed_dict=d)
+    #     d = self.build_feed_dict(problem)
+    #     all_votes, final_lits, logits, costs = self.sess.run([self.all_votes, self.final_lits, self.logits, self.predict_costs], feed_dict=d)
 
-        solutions = []
-        for batch in range(len(problem.is_sat)):
-            decode_cheap_A = (lambda vlit: all_votes[vlit, 0] > all_votes[flip_vlit(vlit), 0])
-            decode_cheap_B = (lambda vlit: not decode_cheap_A(vlit))
+    #     solutions = []
+    #     for batch in range(len(problem.is_sat)):
+    #         decode_cheap_A = (lambda vlit: all_votes[vlit, 0] > all_votes[flip_vlit(vlit), 0])
+    #         decode_cheap_B = (lambda vlit: not decode_cheap_A(vlit))
 
-            def reify(phi):
-                xs = list(zip([phi(vlit) for vlit in range(batch * n_vars_per_batch, (batch+1) * n_vars_per_batch)],
-                              [phi(flip_vlit(vlit)) for vlit in range(batch * n_vars_per_batch, (batch+1) * n_vars_per_batch)]))
-                def one_of(a, b): return (a and (not b)) or (b and (not a))
-                assert(all([one_of(x[0], x[1]) for x in xs]))
-                return [x[0] for x in xs]
+    #         def reify(phi):
+    #             xs = list(zip([phi(vlit) for vlit in range(batch * n_vars_per_batch, (batch+1) * n_vars_per_batch)],
+    #                           [phi(flip_vlit(vlit)) for vlit in range(batch * n_vars_per_batch, (batch+1) * n_vars_per_batch)]))
+    #             def one_of(a, b): return (a and (not b)) or (b and (not a))
+    #             assert(all([one_of(x[0], x[1]) for x in xs]))
+    #             return [x[0] for x in xs]
 
-            if self.solves(problem, batch, decode_cheap_A): solutions.append(reify(decode_cheap_A))
-            elif self.solves(problem, batch, decode_cheap_B): solutions.append(reify(decode_cheap_B))
-            else:
+    #         if self.solves(problem, batch, decode_cheap_A): solutions.append(reify(decode_cheap_A))
+    #         elif self.solves(problem, batch, decode_cheap_B): solutions.append(reify(decode_cheap_B))
+    #         else:
 
-                L = np.reshape(final_lits, [2 * n_batches, n_vars_per_batch, self.opts.d])
-                L = np.concatenate([L[batch, :, :], L[n_batches + batch, :, :]], axis=0)
+    #             L = np.reshape(final_lits, [2 * n_batches, n_vars_per_batch, self.opts.d])
+    #             L = np.concatenate([L[batch, :, :], L[n_batches + batch, :, :]], axis=0)
 
-                kmeans = KMeans(n_clusters=2, random_state=0).fit(L)
-                distances = kmeans.transform(L)
-                scores = distances * distances
+    #             kmeans = KMeans(n_clusters=2, random_state=0).fit(L)
+    #             distances = kmeans.transform(L)
+    #             scores = distances * distances
 
-                def proj_vlit_flit(vlit):
-                    if vlit < problem.n_vars: return vlit - batch * n_vars_per_batch
-                    else:                     return ((vlit - problem.n_vars) - batch * n_vars_per_batch) + n_vars_per_batch
+    #             def proj_vlit_flit(vlit):
+    #                 if vlit < problem.n_vars: return vlit - batch * n_vars_per_batch
+    #                 else:                     return ((vlit - problem.n_vars) - batch * n_vars_per_batch) + n_vars_per_batch
 
-                def decode_kmeans_A(vlit):
-                    return scores[proj_vlit_flit(vlit), 0] + scores[proj_vlit_flit(flip_vlit(vlit)), 1] > \
-                        scores[proj_vlit_flit(vlit), 1] + scores[proj_vlit_flit(flip_vlit(vlit)), 0]
+    #             def decode_kmeans_A(vlit):
+    #                 return scores[proj_vlit_flit(vlit), 0] + scores[proj_vlit_flit(flip_vlit(vlit)), 1] > \
+    #                     scores[proj_vlit_flit(vlit), 1] + scores[proj_vlit_flit(flip_vlit(vlit)), 0]
 
-                decode_kmeans_B = (lambda vlit: not decode_kmeans_A(vlit))
+    #             decode_kmeans_B = (lambda vlit: not decode_kmeans_A(vlit))
 
-                if self.solves(problem, batch, decode_kmeans_A): solutions.append(reify(decode_kmeans_A))
-                elif self.solves(problem, batch, decode_kmeans_B): solutions.append(reify(decode_kmeans_B))
-                else: solutions.append(None)
+    #             if self.solves(problem, batch, decode_kmeans_A): solutions.append(reify(decode_kmeans_A))
+    #             elif self.solves(problem, batch, decode_kmeans_B): solutions.append(reify(decode_kmeans_B))
+    #             else: solutions.append(None)
 
-        return solutions
+    #     return solutions
 
-    def solves(self, problem, batch, phi):
-        start_cell = sum(problem.n_cells_per_batch[0:batch])
-        end_cell = start_cell + problem.n_cells_per_batch[batch]
+    # def solves(self, problem, batch, phi):
+    #     start_cell = sum(problem.n_cells_per_batch[0:batch])
+    #     end_cell = start_cell + problem.n_cells_per_batch[batch]
 
-        if start_cell == end_cell:
-            # no clauses
-            return 1.0
+    #     if start_cell == end_cell:
+    #         # no clauses
+    #         return 1.0
 
-        current_clause = problem.L_unpack_indices[start_cell, 1]
-        current_clause_satisfied = False
+    #     current_clause = problem.L_unpack_indices[start_cell, 1]
+    #     current_clause_satisfied = False
 
-        for cell in range(start_cell, end_cell):
-            next_clause = problem.L_unpack_indices[cell, 1]
+    #     for cell in range(start_cell, end_cell):
+    #         next_clause = problem.L_unpack_indices[cell, 1]
 
-            # the current clause is over, so we can tell if it was unsatisfied
-            if next_clause != current_clause:
-                if not current_clause_satisfied:
-                    return False
+    #         # the current clause is over, so we can tell if it was unsatisfied
+    #         if next_clause != current_clause:
+    #             if not current_clause_satisfied:
+    #                 return False
 
-                current_clause = next_clause
-                current_clause_satisfied = False
+    #             current_clause = next_clause
+    #             current_clause_satisfied = False
 
-            if not current_clause_satisfied:
-                vlit = problem.L_unpack_indices[cell, 0]
-                #print("[%d] %d" % (batch, vlit))
-                if phi(vlit):
-                    current_clause_satisfied = True
+    #         if not current_clause_satisfied:
+    #             vlit = problem.L_unpack_indices[cell, 0]
+    #             #print("[%d] %d" % (batch, vlit))
+    #             if phi(vlit):
+    #                 current_clause_satisfied = True
 
-        # edge case: the very last clause has not been checked yet
-        if not current_clause_satisfied: return False
-        return True
+    #     # edge case: the very last clause has not been checked yet
+    #     if not current_clause_satisfied: return False
+    #     return True
