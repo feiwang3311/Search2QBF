@@ -190,7 +190,7 @@ class NeuroSAT(object):
         snapshot = "snapshots/run%d/snap-%d" % (self.opts.restore_id, self.opts.restore_epoch)
         self.saver.restore(self.sess, snapshot)
 
-    def build_feed_dict(self, problem):
+    def build_feed_dict(self, problem, candidates, labels):
         d = {}
         d[self.n_A_vars] = problem.n_vars_AL[0]
         d[self.n_A_lits] = problem.n_lits_AL[0]
@@ -208,13 +208,13 @@ class NeuroSAT(object):
                                                  dense_shape=[problem.n_lits_AL[0], problem.n_clauses])
 
         #d[self.is_sat] = problem.is_sat
-        d[self.candidates] = problem.candidates
-        d[self.labels] = problem.labels
+        d[self.candidates] = candidates
+        d[self.labels] = labels
 
         return d
 
-    def train_one(self, problem):
-        d = self.build_feed_dict(problem)
+    def train_one(self, problem, candidates, labels):
+        d = self.build_feed_dict(problem, candidates, labels)
         _, grades, cost = self.sess.run([self.apply_gradients, self.grades, self.costs], feed_dict=d)
         self.train_counter += 1
         if self.train_counter >= self.epoch_size:
@@ -223,35 +223,35 @@ class NeuroSAT(object):
             self.save(epoch)
         return grades, cost
 
-    def inference(self, problem):
-        d = self.build_feed_dict(problem)
+    def inference(self, problem, candidates):
+        d = self.build_feed_dict(problem, candidates, None)
         grades = self.sess.run([self.grades], feed_dict=d)
         return grades
 
     # def train_epoch(self, epoch):
-        if self.train_problems_loader is None:
-            self.train_problems_loader = init_problems_loader(self.opts.train_dir)
+    #    if self.train_problems_loader is None:
+    #        self.train_problems_loader = init_problems_loader(self.opts.train_dir)
 
-        epoch_start = time.clock()
+    #    epoch_start = time.clock()
 
-        epoch_train_cost = 0.0
-        epoch_train_mat = ConfusionMatrix()
+    #    epoch_train_cost = 0.0
+    #    epoch_train_mat = ConfusionMatrix()
 
-        train_problems, train_filename = self.train_problems_loader.get_next()
-        for problem in train_problems:
-            d = self.build_feed_dict(problem)
-            _, logits, cost = self.sess.run([self.apply_gradients, self.logits, self.cost], feed_dict=d)
-            epoch_train_cost += cost
-            epoch_train_mat.update(problem.is_sat, logits > 0)
+    #    train_problems, train_filename = self.train_problems_loader.get_next()
+    #    for problem in train_problems:
+    #        d = self.build_feed_dict(problem)
+    #        _, logits, cost = self.sess.run([self.apply_gradients, self.logits, self.cost], feed_dict=d)
+    #        epoch_train_cost += cost
+    #        epoch_train_mat.update(problem.is_sat, logits > 0)
 
-        epoch_train_cost /= len(train_problems)
-        epoch_train_mat = epoch_train_mat.get_percentages()
-        epoch_end = time.clock()
+    #    epoch_train_cost /= len(train_problems)
+    #    epoch_train_mat = epoch_train_mat.get_percentages()
+    #    epoch_end = time.clock()
 
-        learning_rate = self.sess.run(self.learning_rate)
-        self.save(epoch)
+    #    learning_rate = self.sess.run(self.learning_rate)
+    #    self.save(epoch)
 
-        return (train_filename, epoch_train_cost, epoch_train_mat, learning_rate, epoch_end - epoch_start)
+    #    return (train_filename, epoch_train_cost, epoch_train_mat, learning_rate, epoch_end - epoch_start)
 
     # def test(self, test_data_dir):
     #     test_problems_loader = init_problems_loader(test_data_dir)
