@@ -23,7 +23,7 @@ def parse_dimacs(filename):
 
 class feedbacker(object):
 
-    def __init__(self, filename, specs, sizes, keep_history=False):
+    def __init__(self, filename, specs, sizes, max_step = 400, keep_history=False):
         # filename: the filename of the 2QBF problem
         # specs: the spec of the 2QBF, i.e. (2, 3) means each clause has the first 2 lits as forall vars, and the following 3 lits from exists vars
         # sizes: the size of the 2QBF, i.e. (8, 10) means the problem has a total of 8 forall vars and 10 exists vars
@@ -31,11 +31,16 @@ class feedbacker(object):
         self.n_vars, self.iclauses = parse_dimacs(filename)
         self.specs = specs
         self.sizes = sizes
+        # state tracker
         self.unsat = False
+        self.timeout = False
+        self.steps = 0
+        self.max_step = max_step
+        self.witness = None
+        # history for training
+        self.keep_history = keep_history
         self.history = []
         self.last = []
-        self.witness = None
-        self.keep_history = keep_history
 
     def evaluate(self, trials):
         # trials: a set of assignement for forall vars to be tested
@@ -47,6 +52,10 @@ class feedbacker(object):
         for t in trials:
             n_sat = self.evaluate_one(t)
             self.last.append((t, n_sat))
+            self.steps += 1
+            if self.steps >= self.max_step:
+                self.timeout = True
+                break
             if n_sat == 0:
                 self.unsat = True
                 self.witness = t
