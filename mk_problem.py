@@ -29,7 +29,7 @@ def ilit_to_vlit(x, n_vars):
     else: return var
 
 class Problem(object):
-    def __init__(self, specs, sizes, n_vars_AL, iclauses, is_sat, n_A_cells_per_batch, n_L_cells_per_batch, all_dimacs):
+    def __init__(self, specs, sizes, n_vars_AL, iclauses, sampler, n_A_cells_per_batch, n_L_cells_per_batch, all_dimacs):
         self.specs = specs
         self.sizes = sizes
         self.n_vars_AL = n_vars_AL
@@ -41,7 +41,7 @@ class Problem(object):
         self.n_A_cells_per_batch = n_A_cells_per_batch
         self.n_L_cells_per_batch = n_L_cells_per_batch
 
-        self.is_sat = is_sat
+        self.sampler = sampler
         self.compute_AL_unpack(iclauses)
 
         # will be a list of None for training problems
@@ -94,7 +94,7 @@ def shift_iclauses(iclauses, specs, sizes, offsets):
     assert (len(specs) == 2), "only handle 2QBFs"
     assert (len(offsets) == 2), "only handle 2QBFs"
     for iclause in iclauses:
-        assert(len(iclause) == sum(specs)), "num of vars should fits the specs"
+        assert(len(iclause) == sum(specs)), "num of vars {} should fits the specs {}".format(len(iclause), sum(specs))
         for i in range(specs[0]):
             iclause[i] = shift_ilit(iclause[i], offsets, 0, sizes)
         for i in range(specs[0], sum(specs)):
@@ -105,7 +105,8 @@ def shift_iclauses(iclauses, specs, sizes, offsets):
 # this function only applies to 2QBF
 def mk_batch_problem_2QBF(problems):
     all_iclauses = []
-    all_is_sat = []
+    # all_is_sat = []
+    all_sampler = []
     all_n_cells_L = []
     all_n_cells_A = []
     all_dimacs = []
@@ -117,7 +118,7 @@ def mk_batch_problem_2QBF(problems):
     # for example (2, 3) means each clause has 5 vars, first 2 from forall, last 3 from exists
     # sizes is about how many of total variables in each quantifier block
     # for example (8, 10) means the problem has total 8 vars for forall, total 10 vars for exists 
-    for dimacs, specs, sizes, iclauses, is_sat in problems:
+    for dimacs, specs, sizes, iclauses, sampler in problems:
         assert(len(specs) == 2)
         assert(len(sizes) == 2)
         assert(prev_specs is None or specs == prev_specs)
@@ -127,7 +128,8 @@ def mk_batch_problem_2QBF(problems):
 
         # concatenate clauses of a batch of problems together requires the vars to be shifted
         all_iclauses.extend(shift_iclauses(iclauses, specs, sizes, offsets))
-        all_is_sat.append(is_sat)
+        # all_is_sat.append(is_sat)
+        all_sampler.append(sampler)
         all_n_cells_A.append(len(iclauses) * specs[0])
         all_n_cells_L.append(len(iclauses) * specs[1])
         # all_n_cells_L.append(sum([len(iclause) for iclause in iclauses]))
@@ -135,4 +137,4 @@ def mk_batch_problem_2QBF(problems):
         for i in range(len(sizes)):
             offsets[i] += sizes[i]
 
-    return Problem(prev_specs, prev_sizes, offsets, all_iclauses, all_is_sat, all_n_cells_A, all_n_cells_L, all_dimacs)
+    return Problem(prev_specs, prev_sizes, offsets, all_iclauses, all_sampler, all_n_cells_A, all_n_cells_L, all_dimacs)

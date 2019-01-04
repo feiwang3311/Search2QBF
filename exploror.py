@@ -4,12 +4,13 @@ import random
 
 class exploror(object):
 
-    def __init__(self, n_var, seed_size = 5):
+    def __init__(self, n_var, seed_size=5, sample_noise=0.1):
         # n_var: number of forall vars to decide on
         self.n_var = n_var
         self.seed_size = seed_size
+        self.sample_noise = sample_noise
 
-    def set_state(self, seeds, noise = 0.5, probs = None):
+    def set_state(self, seeds, probs = None, probs_noise=0.4):
         # seeds: a small set of assignment for forall vars
         # probs: the probabilty for each var to mutate for exploration
         if len(seeds) == 0:
@@ -20,7 +21,7 @@ class exploror(object):
         if probs is None:
             self.probs = same
         else:
-            self.probs = probs * (1 - noise) + same * noise
+            self.probs = probs * (1 - probs_noise) + same * probs_noise
 
     def sample(self, n_out):
         n_start = len(self.seeds)
@@ -37,6 +38,7 @@ class exploror(object):
             if i >= count:
                 return
 
+    # TODO: need more efficient sampling method
     def add_new_permute(self, seed):
         while True:
             ret = self.permute(seed)
@@ -47,8 +49,9 @@ class exploror(object):
                 return
 
     def permute(self, seed):
-        # seed: a list of size n_var, representing the assignment
-        # seed should not be changed by this function
+        # seed: a tuple of size n_var, representing the assignment
+        if np.random.uniform() < self.sample_noise:
+            return tuple([random.randint(0, 1) for _ in range(self.n_var)])
         mut = np.random.choice(self.n_var, p=self.probs)
         seed1 = list(seed)
         seed1[mut] = 1 - seed1[mut]

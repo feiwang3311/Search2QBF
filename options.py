@@ -36,6 +36,11 @@ def add_neurosat_options(parser):
 
     parser.add_argument('--n_msg_layers', action='store', dest='n_msg_layers', type=int, default=3, help='Number of layers in message MLPs')
     parser.add_argument('--n_vote_layers', action='store', dest='n_vote_layers', type=int, default=3, help='Number of layers in vote MLPs')
+    parser.add_argument('--n_filter_layers', action='store', dest='n_filter_layers', type=int, default=1, help='Number of layers in filter')
+    parser.add_argument('--n_grader_layers', action='store', dest='n_grader_layers', type=int, default=1, help='Number of layers in grader')
+    parser.add_argument('--n_filter_d', action='store', dest='n_filter_d', type=int, default=24, help='Dimension of filter')
 
     parser.add_argument('--tf_seed', action='store', dest='tf_seed', type=int, default=100, help='Random seed for tensorflow')
     parser.add_argument('--np_seed', action='store', dest='np_seed', type=int, default=400, help='Random seed for numpy')
+    parser.add_argument('--epoch_size', action='store', dest='epoch_size', type=int, default=100, help='How many training steps accounts for one epoch')
+    parser.add_argument('--list_size', action='store', dest='list_size', type=int, default=64, help='How many candidates to use for each training example')

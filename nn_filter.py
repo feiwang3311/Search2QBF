@@ -9,7 +9,7 @@ from problems_loader import init_problems_loader
 from mlp import MLP
 from util import repeat_end, decode_final_reducer, decode_transfer_fn
 from tensorflow.contrib.rnn import LSTMStateTuple
-from sklearn.cluster import KMeans
+#from sklearn.cluster import KMeans
 from tensorflow_ranking import losses
 
 class NeuroSAT(object):
@@ -48,8 +48,8 @@ class NeuroSAT(object):
             #self.A_vote = MLP(opts, opts.d, repeat_end(opts.d, opts.n_vote_layers, 1), name=("A_vote"))
             #self.L_vote = MLP(opts, opts.d, repeat_end(opts.d, opts.n_vote_layers, 1), name=("L_vote"))
             #self.vote_bias = tf.get_variable(name="vote_bias", shape=[], initializer=tf.zeros_initializer())
-            self.A_filter = MLP(opts, opts.d, repeat_end(opts.d * 2, opts.n_filter_layers, opts.n_filter_d), name=("A_filter"))
-            self.A_grader = MLP(opts, opts.d, repeat_end(opts.n_filter_d, opts.n_grader_layers, 1), name=("A_grader"))
+            self.A_filter = MLP(opts, opts.d * 2, repeat_end(opts.d, opts.n_filter_layers, opts.n_filter_d), name=("A_filter"))
+            self.A_grader = MLP(opts, opts.n_filter_d, [1], name=("A_grader"))
 
     def declare_placeholders(self):
         self.n_A_vars = tf.placeholder(tf.int32, shape=[], name='n_A_vars')
@@ -66,11 +66,12 @@ class NeuroSAT(object):
 
         # useful helpers
         self.n_batches = tf.div(self.n_A_vars, self.n_A_vars_per_problem)
+        # self.n_batches = tf.placeholder(tf.int32, shape=[], name='n_batches')
 
         # candidates to be ranked by the neural network (None represent number of candidates for each problem)
-        self.candidates = tf.placeholder(tf.float32, shape=[n_batches, None, self.n_A_vars_per_problem], name='candidates')
+        self.candidates = tf.placeholder(tf.float32, shape=[None, None, None], name='candidates')
         # labels: A `Tensor` of shape [batchSize, candidateSize] representing relevance.
-        self.labels = tf.placeholder(tf.int32, shape=[n_batches, None], name='labels')
+        self.labels = tf.placeholder(tf.float32, shape=[None, None], name='labels')
 
     def while_cond(self, i, L_state, C_state, A_state):
         return tf.less(i, self.opts.n_rounds)
@@ -117,20 +118,21 @@ class NeuroSAT(object):
             _, L_state, C_state, A_state = tf.while_loop(self.while_cond, self.while_body, [0, L_state, C_state, A_state])
 
         self.final_A_lits = A_state.h
-        self.final_L_lits = L_state.h
-        self.final_clauses = C_state.h
+        # self.final_L_lits = L_state.h
+        # self.final_clauses = C_state.h
         
     def compute_grades(self):
         with tf.name_scope('compute_grades') as scope:
             self.final_A_vars = tf.concat([self.final_A_lits[0:self.n_A_vars], self.final_A_lits[self.n_A_vars:self.n_A_lits]], axis=1)
             self.final_A_filter = self.A_filter.forward(self.final_A_vars)
-            self.final_A_filter_batched = tf.reshape(self.final_A_filter, [self.n_batches, self.n_A_vars_per_batch, self.n_filter_d])
-            self.final_pre_grades = tf.matmul(tf.candidates, tf.final_A_filter_batched) # n_batch x None x opts.n_filter_d (None is candidate size)
-            self.final_grades = self.A_grader.forward(self.final_pre_grades) # n_batch x None x 1 (None is candidate size)
-            self.grades = tf.reshape(self.final_grades, [self.n_batches, None])
+            self.final_A_filter_batched = tf.reshape(self.final_A_filter, [self.n_batches, self.n_A_vars_per_problem, self.opts.n_filter_d])
+            self.final_pre_grades = tf.matmul(self.candidates, self.final_A_filter_batched) # n_batch x None x opts.n_filter_d (None is candidate size)
+            self.final_pre_grades_reshaped = tf.reshape(self.final_pre_grades, [-1, self.opts.n_filter_d])
+            self.final_grades = self.A_grader.forward(self.final_pre_grades_reshaped) # None x 1 (None is candidate size * n_batch)
+            self.grades = tf.reshape(self.final_grades, [self.n_batches, -1])
 
     def compute_ranking_loss(self):
-        self.loss_fn = make_loss_fn('pairwise_logistic_loss', lambda_weight=create_ndcg_lambda_weight(), name='ranking_loss_fn')
+        self.loss_fn = losses.make_loss_fn('pairwise_logistic_loss', lambda_weight=losses.create_ndcg_lambda_weight(), name='ranking_loss_fn')
         self.ranking_loss = self.loss_fn(self.labels, self.grades, None)
         
         with tf.name_scope('l2') as scope:
@@ -215,7 +217,7 @@ class NeuroSAT(object):
 
     def train_one(self, problem, candidates, labels):
         d = self.build_feed_dict(problem, candidates, labels)
-        _, grades, cost = self.sess.run([self.apply_gradients, self.grades, self.costs], feed_dict=d)
+        _, grades, cost = self.sess.run([self.apply_gradients, self.grades, self.cost], feed_dict=d)
         self.train_counter += 1
         if self.train_counter >= self.epoch_size:
             self.train_counter = 0
@@ -224,57 +226,67 @@ class NeuroSAT(object):
         return grades, cost
 
     def inference(self, problem, candidates):
-        d = self.build_feed_dict(problem, candidates, None)
-        grades = self.sess.run([self.grades], feed_dict=d)
+        d = self.build_feed_dict(problem, candidates, np.zeros((1,1),dtype=np.float32))
+        grades = self.sess.run(self.grades, feed_dict=d)
         return grades
 
-    # def train_epoch(self, epoch):
-    #    if self.train_problems_loader is None:
-    #        self.train_problems_loader = init_problems_loader(self.opts.train_dir)
+    def filter(self, problem, candidates, top_k):
+        grades = self.inference(problem, candidates)
+        index = np.argsort(grades)
+        filtered_can = np.array([candidates[i][index[i][::-1][:top_k]] for i in range(index.shape[0])])
+        return filtered_can
 
-    #    epoch_start = time.clock()
+    def train_epoch(self, epoch):
+        if self.train_problems_loader is None:
+            self.train_problems_loader = init_problems_loader(self.opts.train_dir)
 
-    #    epoch_train_cost = 0.0
-    #    epoch_train_mat = ConfusionMatrix()
+        epoch_start = time.clock()
+        epoch_train_cost = 0.0
+        train_problems, train_filename = self.train_problems_loader.get_next()
+        for problem in train_problems:
+            samples = [sampler.sample(self.opts.list_size) for sampler in problem.sampler]
+            candidates = [sample[0] for sample in samples]
+            labels = [sample[1] for sample in samples]
+            d = self.build_feed_dict(problem, candidates, labels)
+            _, logits, cost = self.sess.run([self.apply_gradients, self.grades, self.cost], feed_dict=d)
+            epoch_train_cost += cost
 
-    #    train_problems, train_filename = self.train_problems_loader.get_next()
-    #    for problem in train_problems:
-    #        d = self.build_feed_dict(problem)
-    #        _, logits, cost = self.sess.run([self.apply_gradients, self.logits, self.cost], feed_dict=d)
-    #        epoch_train_cost += cost
-    #        epoch_train_mat.update(problem.is_sat, logits > 0)
+        epoch_train_cost /= len(train_problems)
+        epoch_end = time.clock()
 
-    #    epoch_train_cost /= len(train_problems)
-    #    epoch_train_mat = epoch_train_mat.get_percentages()
-    #    epoch_end = time.clock()
+        learning_rate = self.sess.run(self.learning_rate)
+        self.save(epoch)
 
-    #    learning_rate = self.sess.run(self.learning_rate)
-    #    self.save(epoch)
+        return (train_filename, epoch_train_cost, learning_rate, epoch_end - epoch_start)
 
-    #    return (train_filename, epoch_train_cost, epoch_train_mat, learning_rate, epoch_end - epoch_start)
+    def test(self, test_data_dir):
+        test_problems_loader = init_problems_loader(test_data_dir)
+        results = []
 
-    # def test(self, test_data_dir):
-    #     test_problems_loader = init_problems_loader(test_data_dir)
-    #     results = []
+        while test_problems_loader.has_next():
+            test_problems, test_filename = test_problems_loader.get_next()
 
-    #     while test_problems_loader.has_next():
-    #         test_problems, test_filename = test_problems_loader.get_next()
+            epoch_test_cost = 0.0
+            epoch_test_mat = ConfusionMatrix()
 
-    #         epoch_test_cost = 0.0
-    #         epoch_test_mat = ConfusionMatrix()
+            for problem in test_problems:
+                d = self.build_feed_dict(problem)
+                logits, cost = self.sess.run([self.logits, self.cost], feed_dict=d)
+                epoch_test_cost += cost
+                epoch_test_mat.update(problem.is_sat, logits > 0)
 
-    #         for problem in test_problems:
-    #             d = self.build_feed_dict(problem)
-    #             logits, cost = self.sess.run([self.logits, self.cost], feed_dict=d)
-    #             epoch_test_cost += cost
-    #             epoch_test_mat.update(problem.is_sat, logits > 0)
+            epoch_test_cost /= len(test_problems)
+            epoch_test_mat = epoch_test_mat.get_percentages()
 
-    #         epoch_test_cost /= len(test_problems)
-    #         epoch_test_mat = epoch_test_mat.get_percentages()
+            results.append((test_filename, epoch_test_cost, epoch_test_mat))
 
-    #         results.append((test_filename, epoch_test_cost, epoch_test_mat))
+        return results
 
-    #     return results
+class dummy_filter(object):
+    def __init__(self):
+        pass
+    def filter(self, problem, trails, top_k):
+        return trails
 
     # def find_solutions(self, problem):
     #     def flip_vlit(vlit):

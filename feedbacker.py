@@ -1,4 +1,6 @@
 import subprocess
+import os
+import numpy as np
 
 def parse_dimacs(filename):
     with open(filename, 'r') as f:
@@ -21,13 +23,36 @@ def parse_dimacs(filename):
     iclauses = [[int(s) for s in line.strip().split(" ")[:-1]] for line in lines[i:]]
     return n_vars, iclauses
 
+def nsat2score(nsat):
+    if nsat <= 3: return 10.0 - nsat
+    if nsat <= 5: return 6.0
+    if nsat <= 8: return 5.0
+    if nsat <= 12: return 4.0
+    if nsat <= 16: return 3.0
+    if nsat <= 21: return 2.0
+    else: return 1.0
+
+class Dsampler(object):
+    # data sampler
+    def __init__(self, history):
+        all_data = list(set(history))
+        self.N = len(all_data)
+        self.all_data_X = np.array([i[0] for i in all_data])
+        self.all_data_Y = np.array([nsat2score(i[1]) for i in all_data], dtype=np.float32)
+        self.weight = self.all_data_Y / np.sum(self.all_data_Y) 
+
+    def sample(self, sample_size):
+        index = np.random.choice(self.N, size=sample_size, p=self.weight)
+        return self.all_data_X[index], self.all_data_Y[index]
+
 class feedbacker(object):
 
     def __init__(self, filename, specs, sizes, max_step = 400, keep_history=False):
         # filename: the filename of the 2QBF problem
-        # specs: the spec of the 2QBF, i.e. (2, 3) means each clause has the first 2 lits as forall vars, and the following 3 lits from exists vars
+        # specs: the spec of the 2QBF, i.e. (2, 3) means each clause has first 2 lits as forall vars, and following 3 lits as exists vars
         # sizes: the size of the 2QBF, i.e. (8, 10) means the problem has a total of 8 forall vars and 10 exists vars
         self.filename = filename
+        self.get_temp_filename()
         self.n_vars, self.iclauses = parse_dimacs(filename)
         self.specs = specs
         self.sizes = sizes
@@ -42,13 +67,45 @@ class feedbacker(object):
         self.history = []
         self.last = []
 
+    def get_temp_filename(self):
+        paths = self.filename.split('/')
+        index = paths.index('QBF')
+        self.temp_filename = '/'.join(paths[:index+1] + ['temp'] + paths[index+1:])
+        temp_path = '/'.join(paths[:index+1] + ['temp'] + paths[index+1:-1])
+        if not os.path.exists(temp_path):
+            os.makedirs(temp_path)
+
+    def reset_state(self, clear_history=False):
+        self.unsat = False
+        self.timeout = False
+        self.steps = 0
+        self.witness = None
+        if clear_history:
+            temp = self.history
+            self.history = []
+            del temp
+            temp = self.last
+            self.last = []
+            del temp
+        else:
+            self.history = self.history + self.last
+            self.last = []
+
+    def data_sampler(self):
+        return Dsampler(self.history + self.last)
+
+    def sample_training_data(self, size):
+        t_nsat_list = choices(self.history + self.last, k=size)
+        X = [list(t_nsat[0]) for t_nsat in t_nsat_list]
+        Y = [nsat2score(t_nsat[1]) for t_nsat in t_nsat_list]
+        return X, Y
+
     def evaluate(self, trials):
         # trials: a set of assignement for forall vars to be tested
         if len(self.last) > 0:
             if self.keep_history:
                 self.history = self.history + self.last
             self.last = []
-        trials = list(trials)
         for t in trials:
             n_sat = self.evaluate_one(t)
             self.last.append((t, n_sat))
@@ -61,9 +118,13 @@ class feedbacker(object):
                 self.witness = t
                 break
         self.last.sort(key=lambda x: x[1])
+        # os.remove(self.temp_filename)
 
     def recommend_seed(self, n_seed):
-        return [x[0] for x in self.last[:n_seed]]
+        if len(self.last) < n_seed:
+            return []
+        else:
+            return [x[0] for x in self.last[:n_seed]]
 
     def evaluate_one(self, t):
         # t: one assignment of forall vars to be tested
@@ -88,7 +149,7 @@ class feedbacker(object):
         return False
 
     def write_sat_to_file(self, sat):
-        filename = self.filename + '_sat'
+        filename = self.temp_filename
         with open(filename, 'w') as f:
             f.write('p cnf {} {}\n'.format(self.sizes[1], len(sat)))
             for s in sat:

@@ -14,8 +14,15 @@ python3 train.py --train_dir ./train10/ --run_id 0
 
 ## Search2QBF
 # use the paired random QBF instances generated for Neural2QBF (only use the unsat instances)
-# to transform dimas to pickle dump (need to find optimal problems_per_batch to maximize the efficiency of GPU memory)
-# temp solution (just take the first 20)
-python3 dimacs_to_data.py --dimacs_dir /u/riker/u99/wang603/QBF/train10 --out_dir ./train10/ --max_dimacs 20 --max_nodes_per_batch 5000 --n_quantifiers 2 -a 2 -a 3 -a 8 -a 10
-# long-term solution (add problem_per_batch option)
-python3 dimacs_to_data.py --dimacs_dir /u/riker/u99/wang603/QBF/train10 --out_dir ./train10/ --problems_per_batch 20 --n_quantifiers 2 -a 2 -a 3 -a 8 -a 10
+# transform 20 files to problem 
+python3 dimacs_to_data.py --dimacs_dir /homes/wang603/QBF/train10_unsat/ --out_dir ./train10_unsat/ --max_dimacs 20 --max_nodes_per_batch 5000 --n_quantifiers 2 -a 2 -a 3 -a 8 -a 10
+
+# transform all 1000 files to problem
+python3 dimacs_to_data.py --dimacs_dir /homes/wang603/QBF/train10_unsat/ --out_dir ./train10_unsat/ --max_nodes_per_batch 5000 --n_quantifiers 2 -a 2 -a 3 -a 8 -a 10
+
+# before running, activate tensorflow_ranking environment
+source ~/QBF/tfr/bin/activate
+
+# train with 1000 problems
+python3 train.py --train_dir ./train10_unsat/ --run_id 3
+

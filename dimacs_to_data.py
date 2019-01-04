@@ -22,6 +22,8 @@ import pickle
 import argparse
 import sys
 from mk_problem import mk_batch_problem_2QBF
+from environment import env
+from multiprocessing import Pool
 
 def parse_dimacs(filename):
     with open(filename, 'r') as f:
@@ -49,8 +51,6 @@ def mk_dataset_filename(opts, n_batches):
     dimacs_dir = dimacs_path[-1] if dimacs_path[-1] != "" else dimacs_path[-2]
     fn = "data_dir=%s_npb=%d_nb=%d.pkl" % (dimacs_dir, opts.max_nodes_per_batch, n_batches)
     return os.path.join(opts.out_dir, fn)
-#    return "%s/data_dir=%s_npb=%d_nb=%d.pkl" % (opts.out_dir, )
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dimacs_dir', action='store', type=str)
@@ -62,26 +62,47 @@ parser.add_argument('--n_quantifiers', action='store', dest='n_quantifiers', typ
 parser.add_argument('-a', action='append', dest='specification', type=int, help='<Required> provide the specs of random QBF', required=True)
 
 opts = parser.parse_args()
+print(opts, flush=True)
+
+# basic set up
 specs = opts.specification[:opts.n_quantifiers]
 sizes = opts.specification[opts.n_quantifiers:]    
+exploror_sample_size = 40
 
+# get all filenames of dimacs files
+filenames = os.listdir(opts.dimacs_dir)
+filenames = sorted(filenames)
+if not (opts.max_dimacs is None):
+    filenames = filenames[:opts.max_dimacs]
+filenames = [os.path.join(opts.dimacs_dir, fn) for fn in filenames]
 
+# get samples for all files
+def runner(filename, tracking=True):
+    play = env(filename, specs, sizes, exploror_sample_size, keep_history=True)
+    sampler = play.run_for_data()
+    if tracking:
+        print(play.file_id, end=' ', flush=True)
+    del play
+    return sampler
+
+print('start generating samplers', flush=True)
+p = Pool(50)
+all_sampler = p.map(runner, filenames)
+print('got all_sampler of size {}'.format(len(all_sampler)))
+all_steps = list(map(lambda x: x.N, all_sampler))
+print('average steps are {}'.format(sum(all_steps) / len(all_steps)))
+with open('temp_sampler', 'wb') as f_dump:
+    pickle.dump(all_sampler, f_dump, pickle.HIGHEST_PROTOCOL)
+
+# get batched problems
 problems = []
 batches = []
 n_nodes_in_batch = 0
 
-filenames = os.listdir(opts.dimacs_dir)
-
-if not (opts.max_dimacs is None):
-    filenames = filenames[:opts.max_dimacs]
-
-# to improve batching
-filenames = sorted(filenames)
-
 prev_n_vars = None
 
-for filename in filenames:
-    n_vars, iclauses = parse_dimacs(os.path.join(opts.dimacs_dir, filename))
+for (filename, sampler) in zip(filenames, all_sampler):
+    n_vars, iclauses = parse_dimacs(filename)
     n_clauses = len(iclauses)
     n_cells = sum([len(iclause) for iclause in iclauses])
 
@@ -105,10 +126,8 @@ for filename in filenames:
 
     prev_n_vars = n_vars
 
-    # is_sat, stats = solve_sat(n_vars, iclauses)
-    assert ('sat' in filename) or ('unsat' in filename)
-    is_sat = ('unsat' not in filename)
-    problems.append((filename, specs, sizes, iclauses, is_sat))
+    problems.append((filename, specs, sizes, iclauses, sampler))
+    # problems.append((filename, specs, sizes, iclauses, is_sat))
     n_nodes_in_batch += n_nodes
 
 if len(problems) > 0:
