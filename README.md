@@ -17,7 +17,7 @@ This repo depends on tensorflow_ranking (https://github.com/tensorflow/ranking),
 
 
 ## Search2QBF
-### use the paired random QBF instances generated for Neural2QBF (only use the unsat instances)
+### Use the paired random QBF instances generated for Neural2QBF (only use the unsat instances)
 ### transform 20 files to problem 
 `python3 dimacs_to_data.py --dimacs_dir /homes/wang603/QBF/train10_unsat/ --out_dir ./train10_unsat/ --max_dimacs 20 --max_nodes_per_batch 5000 --n_quantifiers 2 -a 2 -a 3 -a 8 -a 10`
 
